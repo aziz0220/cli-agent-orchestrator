@@ -58,7 +58,11 @@ class CopilotCliProvider(BaseProvider):
 
     @property
     def paste_enter_count(self) -> int:
-        return 1
+        try:
+            configured = int(str(os.getenv("CAO_COPILOT_PASTE_ENTER_COUNT", "2")).strip() or "2")
+        except ValueError:
+            configured = 2
+        return max(1, configured)
 
     @staticmethod
     def _clean(output: str) -> str:
@@ -125,6 +129,10 @@ class CopilotCliProvider(BaseProvider):
         config_dir = Path.home() / ".copilot"
 
         command_parts = ["copilot", "--allow-all"]
+
+        model = str(os.getenv("CAO_COPILOT_MODEL", "")).strip()
+        if model and self._supports_flag("--model"):
+            command_parts.extend(["--model", model])
 
         if self._agent_profile:
             command_parts.extend(["--agent", self._agent_profile])
@@ -376,6 +384,16 @@ class CopilotCliProvider(BaseProvider):
             break
         return trimmed
 
+    @classmethod
+    def _drop_processing_prefix(cls, lines: list[str]) -> tuple[list[str], bool]:
+        last_processing_idx = -1
+        for idx, line in enumerate(lines):
+            if cls._is_processing_line(line):
+                last_processing_idx = idx
+        if last_processing_idx < 0:
+            return list(lines), False
+        return list(lines[last_processing_idx + 1 :]), True
+
     def get_status(self, tail_lines: Optional[int] = None) -> TerminalStatus:
         effective_tail_lines = tail_lines if tail_lines is not None else 220
         output = self._history(tail_lines=effective_tail_lines)
@@ -408,10 +426,12 @@ class CopilotCliProvider(BaseProvider):
         if last_user < 0:
             return TerminalStatus.IDLE
 
-        post_lines = self._trim_tail_prompts(
-            self._normalize_post_user_lines(lines[last_user + 1 :])
-        )
+        normalized_post_lines = self._normalize_post_user_lines(lines[last_user + 1 :])
+        post_lines, had_processing_line = self._drop_processing_prefix(normalized_post_lines)
+        post_lines = self._trim_tail_prompts(post_lines)
         if not post_lines:
+            if had_processing_line:
+                return TerminalStatus.PROCESSING
             return TerminalStatus.IDLE
 
         if all(self._is_processing_line(line) for line in post_lines):
@@ -437,9 +457,9 @@ class CopilotCliProvider(BaseProvider):
         last_user = self._find_last_user_line(lines)
 
         if last_user >= 0:
-            post_lines = self._trim_tail_prompts(
-                self._normalize_post_user_lines(lines[last_user + 1 :])
-            )
+            normalized_post_lines = self._normalize_post_user_lines(lines[last_user + 1 :])
+            post_lines, _ = self._drop_processing_prefix(normalized_post_lines)
+            post_lines = self._trim_tail_prompts(post_lines)
             while post_lines and self._is_processing_line(post_lines[-1]):
                 post_lines.pop()
             message = "\n".join(post_lines).strip()
